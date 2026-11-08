@@ -1,28 +1,42 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "project-prototype"
 version = "0.1.0"
 description = "Prototype for a future project"
 readme = "README.md"
 authors = [
-  {name = "Jones Martins", email = "15959626+jonesmartins@users.noreply.github.com"}
+    { name = "Jones Martins", email = "15959626+jonesmartins@users.noreply.github.com" },
 ]
 maintainers = [
-  {name = "Jones Martins", email = "15959626+jonesmartins@users.noreply.github.com"}
+    { name = "Jones Martins", email = "15959626+jonesmartins@users.noreply.github.com" },
 ]
+keywords = []
 classifiers = [
     "Typing :: Typed",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     # TODO: Add additional classifiers as needed
 ]
-license = {text = "MIT"}
+license = { text = "MIT" }
 dependencies = [
-  "typer",
-  "rich",
+    "typer",
+    "rich",
+    "pillow",
+    "loguru",
+    "more-itertools",
+    "platformdirs",
+    "rich",
+    "typer",
 ]
-requires-python = ">= 3.12"
+requires-python = ">= 3.11"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
@@ -30,29 +44,34 @@ dev = [
     { include-group = "test" },
     { include-group = "typecheck" },
 ]
-lint = [
-    "ruff",
-]
 test = [
     "coverage",
     "pytest",
+    "pytest-xdist",
+    "pytest-clarity",
+    "pytest-cov",
+    "deptry>=0.25.1",
+    "pipdeptree>=4.2.5",
+    "vulture>=2.16",
 ]
-typecheck = [
-    "ty",
-]
-docs = [
-    "zensical",
-    "mkdocstrings-python",
-]
+lint = ["ruff"]
+typecheck = ["ty"]
+docs = ["zensical", "mkdocstrings-python"]
 
 [project.urls]
-bugs = "https://github.com/jonesmartins/project_prototype/issues"
+issues = "https://github.com/jonesmartins/project_prototype/issues"
 changelog = "https://github.com/jonesmartins/project_prototype/releases"
 documentation = "https://jonesmartins.github.io/project_prototype/"
 homepage = "https://github.com/jonesmartins/project_prototype"
+repository = "https://github.com/jonesmartins/project_prototype"
+# Funding = "https://github.com/sponsors/{{ author_username }}"
 
 [project.scripts]
 project_prototype = "project_prototype.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/project_prototype"]
+exclude = ["*.toml", "*.txt", "logs/"]
 
 [tool.ty]
 # All rules are enabled as "error" by default; no need to specify unless overriding.
@@ -60,17 +79,41 @@ project_prototype = "project_prototype.cli:app"
 # rules.TY015 = "warn"  # For invalid-argument-type, warn instead of error.
 
 [tool.ruff]
-line-length = 120
+target-version = "py310"
+line-length = 80
 
 [tool.ruff.lint]
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade
+select = ["ALL"]
+ignore = [
+    "RET504",
+    # "D",       # TODO: Disabling documentation for now...
+    "CPY",
+    "PERF203", # try-except inside loop
+    "ERA001",  # remove commented-out code
 ]
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120 # Only warn at 120
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101", # Use of assert detected
+]
+
+
+# [tool.ruff.lint]
+# extend-select = ["ASYNC"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+exclude = ["**/.venv", "**/__pycache__", "site"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
 
 [tool.coverage.run]
 branch = true
@@ -92,6 +135,28 @@ exclude_also = [
     "\\.\\.\\.",
 ]
 
+[tool.coverage.html]
+directory = "test-reports"
+
 [tool.uv]
 package = true
 default-groups = ["dev"]
+
+[tool.mypy]
+strict = true
+
+[tool.ruff.format]
+quote-style = "double"
+
+
+# Source: https://github.com/mgaitan/python-package-copier-template/
+[tool.pytest.ini_options]
+# testpaths = ['tests']
+addopts = [
+    # "--cov={{ python_package_import_name }}",
+    "--cov-report=term-missing",
+    "--cov-fail-under=100",
+    "--strict-markers",          # Fail if markers are not registered in pytest configuration
+    "--strict-config",           # Fail if there are errors in pytest configuration
+    "-ra",                       # Show extra test summary info for all except passed tests
+]
