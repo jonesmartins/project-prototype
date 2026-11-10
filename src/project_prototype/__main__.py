@@ -1,4 +1,4 @@
-from project_prototype.cli.main import app
+from project_prototype.cli.main import main_app
 
 if __name__ == "__main__":
-    app()
+    main_app()

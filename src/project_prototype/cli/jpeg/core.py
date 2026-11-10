@@ -4,5 +4,5 @@ app = typer.Typer()
 
 
 @app.command()
-def avif() -> None:
+def jpeg() -> None:
     raise NotImplementedError

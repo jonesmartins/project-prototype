@@ -53,6 +53,7 @@ test = [
     "deptry>=0.25.1",
     "pipdeptree>=4.2.5",
     "vulture>=2.16",
+    "hypothesis>=6.170.15",
 ]
 lint = ["ruff"]
 typecheck = ["ty"]
@@ -86,7 +87,7 @@ line-length = 80
 select = ["ALL"]
 ignore = [
     "RET504",
-    # "D",       # TODO: Disabling documentation for now...
+    "D",       # TODO: Disabling documentation for now...
     "CPY",
     "PERF203", # try-except inside loop
     "ERA001",  # remove commented-out code
