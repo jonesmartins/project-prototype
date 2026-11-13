@@ -64,3 +64,6 @@ site/
 # IDE files
 # .idea/
 # .vscode/
+
+# Project specific
+tests/resources/images/*

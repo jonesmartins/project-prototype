@@ -54,6 +54,9 @@ test = [
     "pipdeptree>=4.2.5",
     "vulture>=2.16",
     "hypothesis>=6.170.15",
+    "aiohttp>=3.14.5",
+    "requests>=2.34.2",
+    "pydantic>=2.14.3",
 ]
 lint = ["ruff"]
 typecheck = ["ty"]
