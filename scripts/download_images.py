@@ -8,17 +8,24 @@
 
 import hashlib
 import io
-import json
+import os
+import re
 import signal
+import tempfile
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
+import time
 import types
 import typing
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum, auto
+from http import HTTPStatus
+from pathlib import Path
 
-from PIL import Image
-import requests
 import pydantic
+import requests
+from loguru import logger
+from PIL import Image
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -29,6 +36,7 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from rich.table import Column
 
 # Files assumed to exist
 PROJECT_DIR_PATH = Path(__file__).parent.parent
@@ -37,6 +45,7 @@ RESOURCES_DIR_PATH = PROJECT_DIR_PATH.joinpath("tests", "resources")
 # Files that may not exist
 IMAGES_DIR_PATH = RESOURCES_DIR_PATH.joinpath("images")
 IMAGES_TO_DOWNLOAD_PATH = RESOURCES_DIR_PATH / "images_to_download.json"
+CREDITS_PATH = RESOURCES_DIR_PATH / "IMAGE_CREDITS.md"
 
 # Download constants
 USER_AGENT = "project-prototype/0.1.0 (https://github.com/jonesmartins/project-prototype)"
@@ -45,12 +54,33 @@ MAX_DOWNLOAD_SPEED = "25 Mbps"  # TODO: Implement.
 MAX_CHUNK_SIZE = 8192  # 8 KiB
 MAX_IMAGE_SIZE = 50 * (2**20)  # 50 MiB
 
-console = Console()
+ALLOWED_IMAGE_HOSTS = {"upload.wikimedia.org"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
+console = Console()
 done_event = threading.Event()
 
-ALLOWED_HOSTS = {"upload.wikimedia.org"}
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+S = typing.TypeVar("S")
+
+
+@dataclass(frozen=True, slots=True)
+class Success(typing.Generic[S]):
+    value: S
+
+
+@dataclass(frozen=True, slots=True)
+class Failure:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class Skipped:
+    reason: str
+
+
+Outcome = Success[S] | Failure | Skipped
+
+Hash = typing.NewType("Hash", str)
 
 
 class ImageData(pydantic.BaseModel):
@@ -61,188 +91,410 @@ class ImageData(pydantic.BaseModel):
         validate_by_name=True,
     )
 
-    sha256: str = pydantic.Field(pattern=f"^[0-9a-fA-F]{40}$")
-    image_url: pydantic.HttpUrl
-    data_url: pydantic.HttpUrl
+    sha256: Hash = pydantic.Field(pattern=r"^[0-9a-f]{40}$")
+    image_url: typing.Annotated[
+        pydantic.HttpUrl,
+        pydantic.UrlConstraints(
+            allowed_schemes=["https"],
+            host_required=True,
+        ),
+    ]
     author: str
-    license_name: str
-    license_url: str
     file_name: str
+    license_name: str
+    data_url: pydantic.HttpUrl | None = None
+    license_url: pydantic.HttpUrl | None = None
 
     @pydantic.field_validator("image_url")
     @classmethod
     def check_image_url(cls, v: pydantic.HttpUrl) -> pydantic.HttpUrl:
-        if v.scheme != "https":
-            msg = f"URL scheme is not https: {v}"
-            raise ValueError(msg)
+        if v.host not in ALLOWED_IMAGE_HOSTS:
+            msg = (
+                f"URL host ({v.host}) must be in {sorted(ALLOWED_IMAGE_HOSTS)}"
+            )
+            raise pydantic.ValidationError(msg)
 
-        if v.host not in ALLOWED_HOSTS:
-            msg = f"URL host ({v.host}) must be in {ALLOWED_HOSTS}"
-            raise ValueError(msg)
         return v
 
     @pydantic.field_validator("file_name")
     @classmethod
     def check_file_name(cls, v: str) -> str:
-        if Path(v).name != v or v.startswith("."):
-            msg = f""
-            raise ValueError(msg)
-        if Path(v).suffix.lower() not in ALLOWED_EXTENSIONS:
-            msg = f""
-            raise ValueError(msg)
+        path = Path(v)
+        if path.name != v or v.startswith("."):
+            msg = "file_name must be in format `<name>.<extension>`"
+            raise pydantic.ValidationError(msg)
+
+        if path.suffix.lower() not in ALLOWED_EXTENSIONS:
+            msg = f"extension must be one of {sorted(ALLOWED_EXTENSIONS)}"
+            raise pydantic.ValidationError(msg)
+
         return v
 
 
-progress = Progress(
-    TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
-    BarColumn(bar_width=None),
-    "[progress.percentage]{task.percentage:>3.1f}%",
-    "•",
-    DownloadColumn(),
-    "•",
-    TransferSpeedColumn(),
-    "•",
-    TimeRemainingColumn(),
-)
-
-
 def download_image(
+    progress_bar: Progress,
     session: requests.Session,
     task_id: TaskID,
     image_data: ImageData,
-) -> bool:
-    image_url = image_data["image_url"]
+) -> Outcome[tuple[io.BytesIO, Hash]]:
+    image_url = image_data.image_url.encoded_string()
 
-    # TODO: Allowlist of hosts
-    # TODO:Path traversal: a file_name like ../../x or an absolute path escapes IMAGES_DIR_PATH. Require Path(name).name == name, or check (IMAGES_DIR_PATH / name).resolve().is_relative_to(IMAGES_DIR_PATH.resolve()).
     with session.get(
         image_url,
         allow_redirects=False,
         stream=True,
-        timeout=30,
+        timeout=(5, 30),
     ) as response:
-        response.raise_for_status()
+        if response.status_code != HTTPStatus.OK:
+            progress_bar.update(
+                task_id,
+                description=f"[red]status code {response.status_code}",
+            )
+            msg = f"image URL request failed with status code {response.status_code}"
+            return Failure(msg)
+
+        content_type = response.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            progress_bar.update(
+                task_id,
+                description=f"[red]wrong content type: {content_type}",
+            )
+            msg = f"image URL request did not return an image: {content_type}"
+            return Failure(msg)
 
         image_size = int(response.headers.get("Content-Length", -1))
 
         if image_size < 0 or image_size > MAX_IMAGE_SIZE:
-            raise
-            # TODO:
-        # size_in_kib = image_size / 2**10
-        # console.print(f"Image size: {size_in_kib:.2f} KiB")
+            progress_bar.update(
+                task_id,
+                description="[red]image size out of bounds",
+            )
+            msg = f"image size is out of bounds [0..{MAX_IMAGE_SIZE} B]: {image_size} B"
+            return Failure(msg)
 
-        progress.update(task_id, total=image_size)
+        progress_bar.update(task_id, total=image_size)
 
         image_buffer = io.BytesIO()
-        progress.start_task(task_id)
+
+        progress_bar.start_task(task_id)
 
         sha256_hash = hashlib.sha256()
         total_bytes = 0
-        last_chunk = 0
-        for chunk in range(0, image_size, MAX_CHUNK_SIZE):
-            if done_event.is_set():
-                break
-            chunk_size = chunk - last_chunk
+
+        # For (bad) debugging purposes:
+        # last_chunk = 0
+        # for chunk in range(0, image_size, MAX_CHUNK_SIZE):
+        #     chunk_size = chunk - last_chunk
+        #     total_bytes += chunk_size
+        #     if total_bytes > MAX_IMAGE_SIZE:
+        #         progress_bar.update(
+        #             task_id,
+        #             description="[red]image size out of bounds",
+        #         )
+        #         msg = f"image size is out of bounds [0..{MAX_IMAGE_SIZE} B]: {total_bytes} B"
+        #         return Failure(msg)
+        #
+        #     progress_bar.update(task_id, advance=chunk_size)
+        #     last_chunk = chunk
+        #     time.sleep(1)
+
+        for chunk in response.iter_content(MAX_CHUNK_SIZE):
+            chunk_size = image_buffer.write(chunk)
             total_bytes += chunk_size
             if total_bytes > MAX_IMAGE_SIZE:
-                console.print(f"[red]")
-                # TODO:
-            # sha256_hash.update(chunk)
-            progress.update(task_id, advance=chunk_size)
-            last_chunk = chunk
+                progress_bar.update(
+                    task_id,
+                    description="[red]image size out of bounds",
+                )
+                msg = f"image size is out of bounds [0..{MAX_IMAGE_SIZE} B]: {total_bytes} B"
+                return Failure(msg)
 
-        # for chunk in response.iter_content(MAX_CHUNK_SIZE):
-        #     if done_event.is_set():
-        #         break
-        #     chunk_size = image_buffer.write(chunk)
-        #     total_bytes += chunk_size
-        #     sha256_hash.update(chunk)
-        #     progress.update(task_id, advance=chunk_size)
+            sha256_hash.update(chunk)
+            progress_bar.update(task_id, advance=chunk_size)
 
-        progress.update(task_id, completed=total_bytes)
+    # Confirm file was downloaded completely
+    if total_bytes < image_size:
+        progress_bar.update(task_id, description="[red]incomplete download")
+        msg = f"image download was incomplete: {image_data.file_name}"
+        return Failure(msg)
 
-        if image_data["sha256"].lower() != sha256_hash.hexdigest():
-            return False
+    progress_bar.update(
+        task_id,
+        description="[green]download completed",
+        completed=total_bytes,
+    )
 
-        img_path = IMAGES_DIR_PATH / image_data["file_name"]
-        img_path.write_bytes(image_buffer.getbuffer())
-        return True
-        # console.print(
-        #     f"[green]Saved {size_in_kib:.2f} KiB to {img_path}[/green]",
-        # )
-        # console.print(
-        #     f"[red]Error: SHA-1 does not match[/red]: {image_data['image_url']}",
-        # )
+    return Success((image_buffer, Hash(sha256_hash.hexdigest())))
 
 
-def handle_sigint(signum: int, frame: types.FrameType | None) -> None:
+def thread(
+    progress_bar: Progress,
+    session: requests.Session,
+    task_id: TaskID,
+    image_data: ImageData,
+) -> Outcome[Path]:
+    if done_event.is_set():
+        msg = "interrupted before download"
+        return Skipped(msg)
+
+    outcome = download_image(
+        progress_bar=progress_bar,
+        session=session,
+        task_id=task_id,
+        image_data=image_data,
+    )
+    match outcome:
+        case Success((image_buffer, sha256_hex)):
+            pass
+        case _:
+            return outcome
+
+    # TODO: SHA-256 not matching.
+    console.print(
+        f"({image_data.file_name}) Expected SHA256:  {image_data.sha256}"
+    )
+    console.print(f"({image_data.file_name}) Image SHA256:  {sha256_hex}")
+
+    if image_data.sha256 != sha256_hex:
+        progress_bar.update(
+            task_id,
+            description="[red]SHA-256 hashes don't match",
+        )
+        msg = "downloaded image's SHA-256 doesn't match expected SHA-256"
+        return Failure(msg)
+
+    progress_bar.update(
+        task_id,
+        description="[green]SHA-256 hashes match",
+    )
+
+    # Save image to temporary file before renaming it
+    # in case something goes wrong.
+    target_path = IMAGES_DIR_PATH / image_data.file_name
+    partial_image_path = target_path.with_suffix(".part")
+    try:
+        partial_image_path.write_bytes(image_buffer.getbuffer())
+    except OSError as e:
+        partial_image_path.unlink(missing_ok=True)
+        progress_bar.update(
+            task_id,
+            description="[red]error writing to .part file",
+        )
+        msg = f"error writing to .part file: {e}"
+        return Failure(msg)
+    else:
+        progress_bar.update(
+            task_id,
+            description="[green]saved to file",
+        )
+        partial_image_path.replace(target_path)
+
+    return Success(target_path)
+
+
+# -------- Main --------
+
+
+def handle_sigint(signum: int, frame: types.FrameType | None) -> None:  # noqa: ARG001
+    """
+    1st Ctrl+C: Stop future downloads;
+    2nd Ctrl+C: Stop all downloads;
+    """
+    if done_event.is_set():
+        os._exit(130)
+
     done_event.set()
+    console.print(
+        "[yellow]Finishing current downloads... Ctrl+C again to force quit",
+    )
 
 
-def parse_image_data(image_data_path: Path) -> list[ImageData]:
-    console.print(f"Reading {image_data_path}")
-    all_images_data = [
-        ImageData(data) for data in json.loads(image_data_path.read_text())
-    ]
+def load_image_data(path: Path) -> list[ImageData]:
+    type_adapter = pydantic.TypeAdapter(list[ImageData])
+    all_images_data = type_adapter.validate_json(path.read_bytes())
+    logger.info(f"Found {len(all_images_data)} image data.")
 
-    # All file_names are unique
-    if len(all_images_data) != len({d["file_name"] for d in all_images_data}):
-        console.print("[red]All `file_name` fields must be unique.")
-        raise SystemExit(1)
+    # All file_names are unique, otherwise they'd overwrite each other.
+    names = [i.file_name for i in all_images_data]
 
-    # All URLs are unique
-    if len(all_images_data) == len({d["image_url"] for d in all_images_data}):
-        console.print("[red]All `image_url` fields must be unique.")
-        raise SystemExit(1)
+    if len(names) != len(set(names)):
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        msg = f"duplicate file_name entries: {duplicates}"
+        raise ValueError(msg)
 
-    console.print(f"Found {len(all_images_data)} image data.")
     return all_images_data
 
 
-def main() -> None:
+def select_images_to_download(
+    image_data_list: list[ImageData],
+) -> list[ImageData]:
+    images_to_download: list[ImageData] = []
+    for image_data in image_data_list:
+        dest_path = IMAGES_DIR_PATH / image_data.file_name
+        if not dest_path.exists():
+            images_to_download.append(image_data)
+        else:
+            file_sha256 = hashlib.sha256(dest_path.read_bytes())
+
+            if file_sha256.hexdigest() != image_data.sha256:
+                images_to_download.append(image_data)
+    return images_to_download
+
+
+def download_images(images_to_download: list[ImageData]) -> list[Path]:
+    progress_bar = Progress(
+        TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+        BarColumn(bar_width=None),
+        "[progress.percentage]{task.percentage:>3.1f}%",
+        "•",
+        DownloadColumn(),
+        "•",
+        TransferSpeedColumn(),
+        "•",
+        TimeRemainingColumn(),
+        TextColumn(
+            "[bold blue]{task.description}",
+            justify="left",
+            table_column=Column(ratio=2),
+        ),
+    )
+
+    with progress_bar, requests.Session() as session:
+        session.headers.update({"User-Agent": USER_AGENT})
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures: dict[Future[Outcome[Path]], ImageData] = {}
+
+            for image_data in images_to_download:
+                task_id = progress_bar.add_task(
+                    "downloading",
+                    start=False,
+                    total=None,
+                    filename=image_data.file_name,  # custom field
+                )
+
+                future = pool.submit(
+                    thread,
+                    progress_bar,
+                    session,
+                    task_id,
+                    image_data,
+                )
+                futures[future] = image_data
+
+        successes: list[Path] = []
+        errors: list[str] = []
+        for future, image_data in futures.items():
+            try:
+                match outcome := future.result():
+                    case Success(path):
+                        successes.append(path)
+                    case Failure(msg) | Skipped(msg):
+                        errors.append(msg)
+                    case _:
+                        typing.assert_never(outcome)
+            except Exception as e:  # noqa :BLE001
+                errors.append(
+                    f"{image_data.file_name}: unexpected {type(e).__name__}: {e}",
+                )
+
+        return successes
+
+
+def md_escape(v: str) -> str:
+    characters_to_escape = re.compile(r"([\\`*_{}\[\]()<>#+!|~&])")
+    return characters_to_escape.sub(r"\\\1", v)
+
+
+def write_credits(
+    all_images_data: list[ImageData],
+    credits_path: Path,
+) -> None:
+    if not all_images_data:
+        return
+
+    lines = [
+        "| File | Author | License |",
+        "| --- | --- | --- |",
+    ]
+    lines += [
+        f"| {md_escape(i.file_name)} | {md_escape(i.author)} | [{md_escape(i.license_name)}]({i.license_url}) |"
+        for i in all_images_data
+        if (IMAGES_DIR_PATH / i.file_name).exists()
+    ]
+    credits_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def save_resized_versions(
+    paths: typing.Sequence[Path],
+    resizes: typing.Sequence[float],
+) -> None:
+    progress_bar = Progress(
+        TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+        BarColumn(bar_width=None),
+        "[progress.percentage]{task.percentage:>3.1f}%",
+        "•",
+        TextColumn(
+            "[bold blue]{task.description}",
+            justify="left",
+            table_column=Column(ratio=2),
+        ),
+    )
+    with progress_bar:
+        for path in paths:
+            task_id = progress_bar.add_task(
+                "resizing...",
+                start=False,
+                total=len(resizes),
+                filename=path.name,
+            )
+            with Image.open(
+                path,
+                formats=list(ALLOWED_EXTENSIONS),
+            ) as image:
+                (curr_width, curr_height) = image.size
+                for resize in resizes:
+                    progress_bar.update(
+                        task_id,
+                        description=f"[green]resizing {100 * resize}%",
+                    )
+                    new_width = int(curr_width * resize)
+                    new_height = int(curr_height * resize)
+                    resized_image = image.resize((new_width, new_height))  # pyright: ignore[reportUnknownMemberType]
+                    resized_image_path = path.with_name(
+                        f"{path.stem}_resized_{100 * resize}%.{path.suffix}",
+                    )
+                    resized_image.save(resized_image_path)
+
+
+def main(image_data_path: Path) -> None:
     signal.signal(signal.SIGINT, handle_sigint)
 
-    all_images_data = parse_image_data(IMAGES_TO_DOWNLOAD_PATH)
+    logger.info(f"Loading image data from {image_data_path}")
+    all_images_data = load_image_data(image_data_path)
 
-    images_to_download_data = [
-        img_data
-        for img_data in all_images_data
-        if not (IMAGES_DIR_PATH / img_data["file_name"]).exists()
-    ]
+    logger.info(f"Writing credits markdown file: {CREDITS_PATH}")
+    write_credits(all_images_data, credits_path=CREDITS_PATH)
 
-    console.print(f"Images to download: {len(images_to_download_data)}")
-    for idx, img_data in enumerate(images_to_download_data, start=1):
-        console.print(f"  {idx}. {img_data['file_name']}")
+    logger.info(f"Selecting images to download from {image_data_path}")
+    images_to_download = (
+        all_images_data
+        if not IMAGES_DIR_PATH.exists()
+        else select_images_to_download(all_images_data)
+    )
+
+    logger.info(f"Images to download: {len(images_to_download)}")
+    for idx, image_data in enumerate(images_to_download, start=1):
+        logger.info(f"  {idx}. {image_data.file_name}")
 
     IMAGES_DIR_PATH.mkdir(exist_ok=True)
 
-    with (
-        ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool,
-        requests.Session() as session,
-        progress,
-    ):
-        session.headers.update({"User-Agent": USER_AGENT})
+    logger.info(f"Downloading {len(images_to_download)} images")
+    image_paths = download_images(images_to_download)
 
-        try:
-            futures: list[Future[bool]] = []
-
-            for img_data in images_to_download_data:
-                task_id = progress.add_task(
-                    f"Downloading {img_data['file_name']}",
-                    start=False,
-                    total=None,
-                    filename=img_data["file_name"],  # custom field
-                )
-
-                future = pool.submit(download_image, session, task_id, img_data)
-                futures.append(future)
-
-            for f in futures:
-                f.result()
-        except KeyboardInterrupt:
-            done_event.set()
-            raise
+    logger.info(f"Saving {len(image_paths)} resized versions")
+    save_resized_versions(image_paths, resizes=(0.5, 0.25, 0.125, 0.0675))
 
 
 if __name__ == "__main__":
-    main()
+    main(IMAGES_TO_DOWNLOAD_PATH)
