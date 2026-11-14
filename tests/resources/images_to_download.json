@@ -1,0 +1,38 @@
+[
+  {
+    "sha256": "02b3b752cc5258e79ce8c36d2fc94f6404d8f2e9a3fa81bfe30c67919f7b91f1",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/3/30/MAM_%282552624380%29.jpg",
+    "data_url": "https://commons.wikimedia.org/wiki/File:MAM_(2552624380).jpg",
+    "author": "Alex Carvalho",
+    "license_name": "Creative Commons Attribution-Shake Alike 2.0 Generic",
+    "license_url": "https://creativecommons.org/licenses/by-sa/2.0/deed.en",
+    "file_name": "mam.jpeg"
+  },
+  {
+    "sha256": "23e42944e247c94edbf766af59d9882efed551cbfcd2f685e959c4ec68a4f13a",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/a/a7/Len%C3%A7%C3%B3is_Maranhenses_2018.jpg",
+    "data_url": "https://commons.wikimedia.org/wiki/File:Len%C3%A7%C3%B3is_Maranhenses_2018.jpg",
+    "author": "Julius Dadalti",
+    "license_name": "Creative Commons Attribution-Share Alike 4.0 International",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/deed.en",
+    "file_name": "lencois_maranhenses.jpeg"
+  },
+  {
+    "sha256": "79b6ed7c78434887aa097a14d4f68946579bbeb393dc5b1bf25428cae2c49e22",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/9/93/Ornate_historic_building_interior_in_Rio_de_Janeiro%2C_Brazil.jpg",
+    "data_url": "https://commons.wikimedia.org/wiki/File:Ornate_historic_building_interior_in_Rio_de_Janeiro,_Brazil.jpg",
+    "author": "Wilfredor",
+    "license_name": "Creative Commons CC0 1.0 Universal Public Domain Dedication",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/deed.en",
+    "file_name": "parque_lage.jpeg"
+  },
+  {
+    "sha256": "5053a08d4b4c8ef796e9b7fd786f7c9c0572ee47e95499a9698bec2c17361c8e",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/4/4f/Rio_de_Janeiro_skyline_and_Sugarloaf_Mountain_at_sunset%2C_Brazil_2.jpg",
+    "data_url": "https://commons.wikimedia.org/wiki/File:Rio_de_Janeiro_skyline_and_Sugarloaf_Mountain_at_sunset,_Brazil_2.jpg",
+    "author": "Wilfredor",
+    "license_name": "Creative Commons CC0 1.0 Universal Public Domain Dedication",
+    "license_url": "https://creativecommons.org/publicdomain/zero/1.0/deed.en",
+    "file_name": "rio_de_janeiro_skyline.jpeg"
+  }
+]

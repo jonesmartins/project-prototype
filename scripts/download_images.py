@@ -1,31 +1,32 @@
 # noqa: INP001
-
-#   - Parse tests/images_to_download.json
-#   - Download image from url
-#   - Confirm image's checksum matches SHA-1 from json
-#   - Save image to tests/resources/images/ directory
-#   - Add author and license information to tests/resources/IMAGE_CREDITS.md
-
 import hashlib
 import io
 import os
 import re
 import signal
-import tempfile
 import threading
 import time
 import types
-import typing
+import typing as t
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import Enum, auto
 from http import HTTPStatus
 from pathlib import Path
 
-import pydantic
 import requests
 from loguru import logger
 from PIL import Image
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    StringConstraints,
+    TypeAdapter,
+    UrlConstraints,
+    ValidationError,
+    field_validator,
+)
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -60,11 +61,11 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 console = Console()
 done_event = threading.Event()
 
-S = typing.TypeVar("S")
+S = t.TypeVar("S")
 
 
 @dataclass(frozen=True, slots=True)
-class Success(typing.Generic[S]):
+class Success(t.Generic[S]):
     value: S
 
 
@@ -80,62 +81,62 @@ class Skipped:
 
 Outcome = Success[S] | Failure | Skipped
 
-Hash = typing.NewType("Hash", str)
+Hash = t.NewType("Hash", str)
 
 
-class ImageData(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(
+class ImageData(BaseModel):
+    model_config = ConfigDict(
         str_strip_whitespace=True,
         extra="forbid",
         frozen=True,
         validate_by_name=True,
     )
 
-    sha256: Hash = pydantic.Field(pattern=r"^[0-9a-f]{40}$")
-    image_url: typing.Annotated[
-        pydantic.HttpUrl,
-        pydantic.UrlConstraints(
+    image_url: t.Annotated[
+        HttpUrl,
+        UrlConstraints(
             allowed_schemes=["https"],
             host_required=True,
         ),
     ]
-    author: str
-    file_name: str
-    license_name: str
-    data_url: pydantic.HttpUrl | None = None
-    license_url: pydantic.HttpUrl | None = None
+    sha256: Hash = Field(pattern=r"^[0-9a-f]{64}$")
+    author: t.Annotated[str, StringConstraints(min_length=1)]
+    file_name: t.Annotated[str, StringConstraints(min_length=1)]
+    license_name: t.Annotated[str, StringConstraints(min_length=1)]
+    data_url: HttpUrl | None = None
+    license_url: HttpUrl | None = None
 
-    @pydantic.field_validator("image_url")
+    @field_validator("image_url")
     @classmethod
-    def check_image_url(cls, v: pydantic.HttpUrl) -> pydantic.HttpUrl:
+    def check_image_url(cls, v: HttpUrl) -> HttpUrl:
         if v.host not in ALLOWED_IMAGE_HOSTS:
             msg = (
                 f"URL host ({v.host}) must be in {sorted(ALLOWED_IMAGE_HOSTS)}"
             )
-            raise pydantic.ValidationError(msg)
+            raise ValidationError(msg)
 
         return v
 
-    @pydantic.field_validator("file_name")
+    @field_validator("file_name")
     @classmethod
     def check_file_name(cls, v: str) -> str:
         path = Path(v)
         if path.name != v or v.startswith("."):
             msg = "file_name must be in format `<name>.<extension>`"
-            raise pydantic.ValidationError(msg)
+            raise ValidationError(msg)
 
         if path.suffix.lower() not in ALLOWED_EXTENSIONS:
             msg = f"extension must be one of {sorted(ALLOWED_EXTENSIONS)}"
-            raise pydantic.ValidationError(msg)
+            raise ValidationError(msg)
 
         return v
 
 
 def download_image(
-    progress_bar: Progress,
-    session: requests.Session,
-    task_id: TaskID,
     image_data: ImageData,
+    session: requests.Session,
+    progress_bar: Progress,
+    task_id: TaskID,
 ) -> Outcome[tuple[io.BytesIO, Hash]]:
     image_url = image_data.image_url.encoded_string()
 
@@ -238,10 +239,10 @@ def thread(
         return Skipped(msg)
 
     outcome = download_image(
-        progress_bar=progress_bar,
-        session=session,
-        task_id=task_id,
         image_data=image_data,
+        session=session,
+        progress_bar=progress_bar,
+        task_id=task_id,
     )
     match outcome:
         case Success((image_buffer, sha256_hex)):
@@ -250,10 +251,10 @@ def thread(
             return outcome
 
     # TODO: SHA-256 not matching.
-    console.print(
+    console.log(
         f"({image_data.file_name}) Expected SHA256:  {image_data.sha256}"
     )
-    console.print(f"({image_data.file_name}) Image SHA256:  {sha256_hex}")
+    console.log(f"({image_data.file_name}) Image SHA256:  {sha256_hex}")
 
     if image_data.sha256 != sha256_hex:
         progress_bar.update(
@@ -304,13 +305,13 @@ def handle_sigint(signum: int, frame: types.FrameType | None) -> None:  # noqa: 
         os._exit(130)
 
     done_event.set()
-    console.print(
+    console.log(
         "[yellow]Finishing current downloads... Ctrl+C again to force quit",
     )
 
 
 def load_image_data(path: Path) -> list[ImageData]:
-    type_adapter = pydantic.TypeAdapter(list[ImageData])
+    type_adapter = TypeAdapter(list[ImageData])
     all_images_data = type_adapter.validate_json(path.read_bytes())
     logger.info(f"Found {len(all_images_data)} image data.")
 
@@ -342,7 +343,7 @@ def select_images_to_download(
 
 
 def download_images(images_to_download: list[ImageData]) -> list[Path]:
-    progress_bar = Progress(
+    download_progress_bar = Progress(
         TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
         BarColumn(bar_width=None),
         "[progress.percentage]{task.percentage:>3.1f}%",
@@ -359,14 +360,14 @@ def download_images(images_to_download: list[ImageData]) -> list[Path]:
         ),
     )
 
-    with progress_bar, requests.Session() as session:
+    with download_progress_bar, requests.Session() as session:
         session.headers.update({"User-Agent": USER_AGENT})
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures: dict[Future[Outcome[Path]], ImageData] = {}
 
             for image_data in images_to_download:
-                task_id = progress_bar.add_task(
+                task_id = download_progress_bar.add_task(
                     "downloading",
                     start=False,
                     total=None,
@@ -375,7 +376,7 @@ def download_images(images_to_download: list[ImageData]) -> list[Path]:
 
                 future = pool.submit(
                     thread,
-                    progress_bar,
+                    download_progress_bar,
                     session,
                     task_id,
                     image_data,
@@ -386,13 +387,11 @@ def download_images(images_to_download: list[ImageData]) -> list[Path]:
         errors: list[str] = []
         for future, image_data in futures.items():
             try:
-                match outcome := future.result():
+                match future.result():
                     case Success(path):
                         successes.append(path)
                     case Failure(msg) | Skipped(msg):
                         errors.append(msg)
-                    case _:
-                        typing.assert_never(outcome)
             except Exception as e:  # noqa :BLE001
                 errors.append(
                     f"{image_data.file_name}: unexpected {type(e).__name__}: {e}",
@@ -426,10 +425,10 @@ def write_credits(
 
 
 def save_resized_versions(
-    paths: typing.Sequence[Path],
-    resizes: typing.Sequence[float],
+    paths: t.Sequence[Path],
+    resizes: t.Sequence[float],
 ) -> None:
-    progress_bar = Progress(
+    resize_progress_bar = Progress(
         TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
         BarColumn(bar_width=None),
         "[progress.percentage]{task.percentage:>3.1f}%",
@@ -440,9 +439,10 @@ def save_resized_versions(
             table_column=Column(ratio=2),
         ),
     )
-    with progress_bar:
+
+    with resize_progress_bar:
         for path in paths:
-            task_id = progress_bar.add_task(
+            task_id = resize_progress_bar.add_task(
                 "resizing...",
                 start=False,
                 total=len(resizes),

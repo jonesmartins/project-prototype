@@ -66,4 +66,4 @@ site/
 # .vscode/
 
 # Project specific
-tests/resources/images/*
+tests/resources/images
